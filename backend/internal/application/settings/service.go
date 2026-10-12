@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
@@ -312,10 +314,11 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 	if capacityWait <= 0 {
 		capacityWait = base.Routing.CapacityWait.Value()
 	}
+	buildClientVersion, buildUserAgent := normalizePersistedBuildClientFingerprint(value.ProviderBuild.ClientVersion, value.ProviderBuild.UserAgent)
 	base.Provider.Build = config.BuildProviderConfig{
 		BaseURL: value.ProviderBuild.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(value.ProviderBuild.FallbackBaseURL),
-		ClientVersion: value.ProviderBuild.ClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
-		TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: value.ProviderBuild.UserAgent,
+		ClientVersion: buildClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
+		TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: buildUserAgent,
 		ResponseHeaderTimeout: config.Duration(value.ProviderBuild.ResponseHeaderTimeout),
 		StreamIdleTimeout:     config.Duration(value.ProviderBuild.StreamIdleTimeout),
 	}
@@ -771,3 +774,92 @@ func normalizeForbiddenCodes(values []string) []string {
 	}
 	return result
 }
+
+func normalizePersistedBuildClientFingerprint(clientVersion, userAgent string) (string, string) {
+	clientVersion = strings.TrimSpace(clientVersion)
+	userAgent = strings.TrimSpace(userAgent)
+	if clientVersion == "" || isBuildVersionOlderThan(clientVersion, config.RecommendedBuildClientVersion) {
+		clientVersion = config.RecommendedBuildClientVersion
+	}
+	if userAgent == "" {
+		if clientVersion == config.RecommendedBuildClientVersion {
+			return clientVersion, config.RecommendedBuildUserAgent
+		}
+		return clientVersion, "grok-shell/" + clientVersion + " (linux; x86_64)"
+	}
+	if uaVersion, rest, ok := cutGrokShellUserAgentVersion(userAgent); ok {
+		if uaVersion == "" || isBuildVersionOlderThan(uaVersion, clientVersion) {
+			if rest == "" && uaVersion == "" {
+				return clientVersion, config.RecommendedBuildUserAgent
+			}
+			return clientVersion, "grok-shell/" + clientVersion + rest
+		}
+	}
+	return clientVersion, userAgent
+}
+
+func cutGrokShellUserAgentVersion(userAgent string) (version, rest string, ok bool) {
+	const prefix = "grok-shell/"
+	if len(userAgent) < len(prefix) || !strings.EqualFold(userAgent[:len(prefix)], prefix) {
+		return "", "", false
+	}
+	after := userAgent[len(prefix):]
+	idx := strings.IndexFunc(after, unicode.IsSpace)
+	if idx < 0 {
+		return after, "", true
+	}
+	return after[:idx], after[idx:], true
+}
+
+func isBuildVersionOlderThan(candidate, baseline string) bool {
+	candidateParts, ok := parseBuildVersion(candidate)
+	if !ok {
+		return false
+	}
+	baselineParts, ok := parseBuildVersion(baseline)
+	if !ok {
+		return false
+	}
+	limit := len(candidateParts)
+	if len(baselineParts) > limit {
+		limit = len(baselineParts)
+	}
+	for index := 0; index < limit; index++ {
+		var left, right int
+		if index < len(candidateParts) {
+			left = candidateParts[index]
+		}
+		if index < len(baselineParts) {
+			right = baselineParts[index]
+		}
+		if left != right {
+			return left < right
+		}
+	}
+	return false
+}
+
+func parseBuildVersion(raw string) ([]int, bool) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(strings.TrimPrefix(raw, "v"), "V")
+	if idx := strings.IndexAny(raw, "-+"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if raw == "" {
+		return nil, false
+	}
+	segments := strings.Split(raw, ".")
+	parts := make([]int, 0, len(segments))
+	for _, segment := range segments {
+		if segment == "" {
+			return nil, false
+		}
+		value, err := strconv.Atoi(segment)
+		if err != nil || value < 0 {
+			return nil, false
+		}
+		parts = append(parts, value)
+	}
+	return parts, true
+}
+

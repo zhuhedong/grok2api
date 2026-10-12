@@ -421,6 +421,65 @@ func TestSnapshotIncludesRecommendedBuildBaseline(t *testing.T) {
 	}
 }
 
+func TestLoadPersistedUpgradesLegacyBuildClientFingerprint(t *testing.T) {
+	tests := []struct {
+		name          string
+		clientVersion string
+		userAgent     string
+		wantVersion   string
+		wantUserAgent string
+	}{
+		{
+			name:          "legacy 1.0.4 baseline",
+			clientVersion: "1.0.4",
+			userAgent:     "grok-shell/1.0.4 (linux; x86_64)",
+			wantVersion:   config.RecommendedBuildClientVersion,
+			wantUserAgent: config.RecommendedBuildUserAgent,
+		},
+		{
+			name:          "legacy 0.2.119 baseline",
+			clientVersion: "0.2.119",
+			userAgent:     "grok-shell/0.2.119 (linux; x86_64)",
+			wantVersion:   config.RecommendedBuildClientVersion,
+			wantUserAgent: config.RecommendedBuildUserAgent,
+		},
+		{
+			name:          "updated client version with stale grok-shell user agent",
+			clientVersion: config.RecommendedBuildClientVersion,
+			userAgent:     "grok-shell/1.0.4 (linux; x86_64)",
+			wantVersion:   config.RecommendedBuildClientVersion,
+			wantUserAgent: config.RecommendedBuildUserAgent,
+		},
+		{
+			name:          "newer client version preserved",
+			clientVersion: "1.0.99",
+			userAgent:     "grok-shell/1.0.99 (linux; x86_64)",
+			wantVersion:   "1.0.99",
+			wantUserAgent: "grok-shell/1.0.99 (linux; x86_64)",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			value := toDomainConfig(cfg)
+			value.ProviderBuild.ClientVersion = test.clientVersion
+			value.ProviderBuild.UserAgent = test.userAgent
+			repository := &runtimeSettingsRepositoryStub{value: value, found: true}
+
+			loaded, _, _, err := LoadPersisted(context.Background(), cfg, repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Provider.Build.ClientVersion != test.wantVersion || loaded.Provider.Build.UserAgent != test.wantUserAgent {
+				t.Fatalf("loaded build fingerprint = (%q, %q), want (%q, %q)",
+					loaded.Provider.Build.ClientVersion, loaded.Provider.Build.UserAgent,
+					test.wantVersion, test.wantUserAgent,
+				)
+			}
+		})
+	}
+}
+
 func TestUpdateRejectsBatchConcurrencyOutsideSafeRange(t *testing.T) {
 	cfg := testConfig(t)
 	repository := &runtimeSettingsRepositoryStub{}
